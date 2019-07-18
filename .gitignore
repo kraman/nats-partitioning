@@ -1,0 +1,7 @@
+vendor/
+build/
+cache/
+**/*.pb.go
+**/*.swagger.go
+**/*.swagger.json
+**/server.proto.build
