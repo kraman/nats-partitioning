@@ -4,14 +4,25 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kraman/nats-test/cmd"
-	_ "github.com/kraman/nats-test/lib/discovery/serf"
-	_ "github.com/kraman/nats-test/lib/discovery/nats"
+	"github.com/kraman/nats-test/lib/cluster"
+	"github.com/nats-io/nats.go"
+	"github.com/sirupsen/logrus"
 )
 
 func main() {
-	if err := cmd.RootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
+	nc, err := nats.Connect(nats.DefaultURL)
+	if err != nil {
+		logrus.Fatal(err)
+	}
+	defer nc.Close()
+	ip := os.Getenv("POD_IP")
+	cluster, err := cluster.Create(nc, "test", ip, ip)
+	if err != nil {
+		logrus.Fatal(err)
+	}
+
+	for {
+		e := <-cluster.EventChan()
+		fmt.Printf("%v\n", e)
 	}
 }
