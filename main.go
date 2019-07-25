@@ -1,8 +1,9 @@
 package main
 
 import (
-	"fmt"
+	"net"
 	"os"
+	"time"
 
 	"github.com/kraman/nats-test/lib/cluster"
 	"github.com/nats-io/nats.go"
@@ -16,13 +17,20 @@ func main() {
 	}
 	defer nc.Close()
 	ip := os.Getenv("POD_IP")
-	cluster, err := cluster.Create(nc, "test", ip, ip)
+
+	_, err = cluster.Create(cluster.Config{
+		ClusterName:     "test",
+		NodeName:        ip,
+		NodeIP:          net.ParseIP(ip),
+		NatsConn:        nc,
+		Logger:          logrus.StandardLogger(),
+		NodeTTLSec:      2 * time.Second,
+		ReaperTimeout:   10 * time.Second,
+		ElectionTimeout: 10 * time.Second,
+	})
 	if err != nil {
 		logrus.Fatal(err)
 	}
 
-	for {
-		e := <-cluster.EventChan()
-		fmt.Printf("%v\n", e)
-	}
+	select {}
 }
