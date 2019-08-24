@@ -2,109 +2,117 @@ package cluster
 
 import (
 	"fmt"
-	"net"
-	"time"
 
-	"sync"
-
-	"github.com/hashicorp/serf/serf"
-	nats "github.com/nats-io/nats.go"
-	"github.com/pkg/errors"
 	uuid "github.com/satori/go.uuid"
-	"github.com/sirupsen/logrus"
 )
 
-type Config struct {
-	ClusterName     string
-	NodeName        string
-	NodeIP          net.IP
-	NatsConn        *nats.Conn
-	Logger          *logrus.Logger
-	NodeTTLSec      time.Duration
-	ReaperTimeout   time.Duration
-	ElectionTimeout time.Duration
+type Cluster interface {
+	// Leave gracefully exits the cluster. It is safe to call this multiple times.
+	Leave() error
+
+	// Shutdown forcefully shuts down the member, stopping all network activity and background maintenance associated with the instance.
+	//
+	// This is not a graceful shutdown, and should be preceded by a call to Leave. Otherwise, other nodes in the cluster will detect this node's exit as a node failure.
+	//
+	// It is safe to call this method multiple times.
+	Shutdown() error
+
+	// EventChan returns a channel that receives all the member events. The events
+	// are sent on this channel in proper ordering.
+	EventChan() <-chan *MemberEvent
+
+	// Members provides a point-in-time view of cluster members
+	Members() []Member
+
+	AliveMembers() []Member
+
+	// Leader returns a point-in-time leader member information
+	Leader() Member
+
+	IsLeader() bool
+
+	ID() uuid.UUID
+
+	Name() string
 }
 
-type Cluster struct {
-	Config
-	members          map[string]*memberState
-	shutdownCh       chan struct{}
-	eventCh          chan *MemberEvent
-	lClock           *serf.LamportClock
-	bcastChannelName string
-	sync.Mutex
+type Member struct {
+	Addr   interface{}
+	Tags   map[string]string
+	Status MemberStatus
+	ID     uuid.UUID
 
-	// election fields
-	electionTimer  *time.Timer
-	leaderNodeName string
+	// bully algorithm fields
+	IsLeader bool
 }
 
-// Create creates a new Cluster instance, starting all the background tasks
-// to maintain membership information.
-func Create(config Config) (*Cluster, error) {
-	cluster := &Cluster{
-		Config: config,
-		members: map[string]*memberState{
-			config.NodeName: &memberState{
-				Member: Member{
-					Name:   config.NodeName,
-					Addr:   config.NodeIP,
-					Tags:   map[string]string{},
-					Status: StatusAlive,
-					ID:     uuid.NewV4(),
-				},
-				WallTime: time.Now(),
-			},
-		},
-		shutdownCh: make(chan struct{}),
-		eventCh:    make(chan *MemberEvent),
-		lClock:     &serf.LamportClock{},
+func (m Member) String() string {
+	return fmt.Sprintf("Leader: %v, Addr: %v, Tags: %v, Status: %v, ID: %v", m.IsLeader, m.Addr, m.Tags, m.Status, m.ID)
+}
+
+// MemberStatus is the state that a member is in.
+type MemberStatus int
+
+const (
+	StatusNone MemberStatus = iota
+	StatusAlive
+	StatusLeaving
+	StatusLeft
+	StatusFailed
+)
+
+func (s MemberStatus) String() string {
+	switch s {
+	case StatusNone:
+		return "none"
+	case StatusAlive:
+		return "alive"
+	case StatusLeaving:
+		return "leaving"
+	case StatusLeft:
+		return "left"
+	case StatusFailed:
+		return "failed"
+	default:
+		panic(fmt.Sprintf("unknown MemberStatus: %d", s))
 	}
-	cluster.bcastChannelName = fmt.Sprintf("_DISCOVERY.%s", cluster.ClusterName)
+}
 
-	pingCh := make(chan *nats.Msg, 10)
-	pingSub, err := cluster.NatsConn.ChanSubscribe(cluster.bcastChannelName, pingCh)
-	if err != nil {
-		return nil, errors.Wrapf(err, "unable to subscript to member broadcast")
+// EventType are all the types of events that may occur
+type EventType int
+
+const (
+	EventMemberJoin EventType = iota
+	EventMemberLeave
+	EventMemberFailed
+	EventMemberUpdate
+	EventMemberReap
+	EventMemberIsLeader
+)
+
+func (t EventType) String() string {
+	switch t {
+	case EventMemberJoin:
+		return "member-join"
+	case EventMemberLeave:
+		return "member-leave"
+	case EventMemberFailed:
+		return "member-failed"
+	case EventMemberUpdate:
+		return "member-update"
+	case EventMemberReap:
+		return "member-reap"
+	case EventMemberIsLeader:
+		return "member-is-leader"
+	default:
+		panic(fmt.Sprintf("unknown event type: %d", t))
 	}
-	cluster.lClock.Increment()
-
-	go cluster.bcastAlive()
-	go cluster.processBcast(pingCh, pingSub)
-
-	return cluster, nil
+	return ""
 }
 
-// Leave gracefully exits the cluster. It is safe to call this multiple times.
-func (c *Cluster) Leave() error {
-	c.Lock()
-	defer c.Unlock()
-	if m, ok := c.members[c.NodeName]; ok {
-		m.Status = StatusLeaving
-	}
-	return nil
-}
-
-// Shutdown forcefully shuts down the member, stopping all network activity and background maintenance associated with the instance.
-//
-// This is not a graceful shutdown, and should be preceded by a call to Leave. Otherwise, other nodes in the cluster will detect this node's exit as a node failure.
-//
-// It is safe to call this method multiple times.
-func (c *Cluster) Shutdown() error {
-	close(c.shutdownCh)
-	return nil
-}
-
-func (c *Cluster) EventChan() <-chan *MemberEvent {
-	return c.eventCh
-}
-
-func (c *Cluster) Members() []Member {
-	m := []Member{}
-	for _, ms := range c.members {
-		if ms.Status != StatusLeft {
-			m = append(m, ms.Member)
-		}
-	}
-	return m
+// MemberEvent is the struct used for member related events.
+type MemberEvent struct {
+	Type    EventType
+	Member  Member
+	Members []Member
 }

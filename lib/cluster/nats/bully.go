@@ -1,30 +1,25 @@
-package cluster
+package nats
 
 import (
 	"bytes"
 	"encoding/json"
 	"time"
+
+	"github.com/kraman/nats-test/lib/cluster"
 )
 
-func (c *Cluster) startElection() {
+func (c *NatsCluster) startElection() {
 	c.Logger.Debugf("starting election")
 	// stop any previous election timers
 	c.stopElection()
 	// send election message
 
 	c.electionTimer = time.AfterFunc(c.ElectionTimeout, func() {
-		c.Logger.Debug("election self as leader")
-		c.stopElection()
-		c.Lock()
-		defer c.Unlock()
-		self := c.members[c.NodeName]
-		self.IsLeader = true
-		c.leaderNodeName = c.NodeName
-		c.postMemberEvent(EventMemberUpdate, c.members[c.NodeName].Member)
+		c.leaderCh <- 1
 	})
 }
 
-func (c *Cluster) stopElection() {
+func (c *NatsCluster) stopElection() {
 	c.Logger.Debug("stopping election on this node")
 
 	if c.electionTimer != nil {
@@ -33,56 +28,57 @@ func (c *Cluster) stopElection() {
 	}
 }
 
-func (c *Cluster) processElectionAnnouncement(m *memberState) {
+func (c *NatsCluster) processElectionAnnouncement(m *memberState) {
 	c.Lock()
 	defer c.Unlock()
-	if m.Name == c.NodeName || m.Status != StatusAlive {
+	if m.ID == c.clientID || m.Status != cluster.StatusAlive {
 		return
 	}
 	if m.IsLeader {
-		c.leaderNodeName = m.Name
+		c.leaderID = m.ID
 		return
 	}
 	if c.electionTimer != nil {
 		// still participating in election
-		self := c.members[c.NodeName]
+		self := c.members[c.clientID]
 		if bytes.Compare(self.ID.Bytes(), m.ID.Bytes()) == -1 {
+			// ID smaller than others. mark as follower
 			self.IsLeader = false
 			c.stopElection()
 		} else {
-			// maybe leader?
+			// start next cycle of bully election
 			c.startElection()
 		}
 	}
 }
 
-func (c *Cluster) processElectionMessage(m *memberState) {
-	if m.Name == c.NodeName {
+func (c *NatsCluster) processElectionMessage(m *memberState) {
+	if m.ID == c.clientID {
 		return
 	}
-	self := c.members[c.NodeName]
 
+	self := c.members[c.clientID]
 	if bytes.Compare(self.ID.Bytes(), m.ID.Bytes()) == 1 {
-		// still participating in election, maybe leader?
+		// ID larger than incoming message. still part of election
 		c.sendElectionOK()
 		c.startElection()
 	}
 }
 
-func (c *Cluster) processElectionOkMessage(m *memberState) {
+func (c *NatsCluster) processElectionOkMessage(m *memberState) {
 	c.Lock()
 	defer c.Unlock()
-	self := c.members[c.NodeName]
+	self := c.members[c.clientID]
 	if bytes.Compare(self.ID.Bytes(), m.ID.Bytes()) == -1 {
 		self.IsLeader = false
 		c.stopElection()
 	}
 }
 
-func (c *Cluster) sendElectionOK() {
+func (c *NatsCluster) sendElectionOK() {
 	c.Lock()
 	defer c.Unlock()
-	memberState := c.members[c.NodeName]
+	memberState := c.members[c.clientID]
 	memberState.LTime = c.lClock.Increment()
 	memberState.WallTime = time.Now()
 

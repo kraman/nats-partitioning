@@ -1,0 +1,23 @@
+syntax="proto3";
+package partitions;
+
+message PartitionOwners {
+	map<uint32, string> assigned_owners = 1;
+	map<uint32, string> actual_owners = 2;
+}
+
+message AssignPartitionsEvent {
+    map<uint32, string> owners = 2;
+}
+
+message ReservePartitionEvent {
+    uint64 assign_partition_evt_seqno = 1;
+    uint32 partition_id = 2;
+    string owner_id = 3; 
+}
+
+message ReleasePartitionEvent {
+    uint64 assign_partition_evt_seqno = 1;
+    uint32 partition_id = 2;
+    string owner_id = 3; 
+}
