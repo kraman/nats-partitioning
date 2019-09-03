@@ -21,13 +21,8 @@ type Cluster interface {
 	// are sent on this channel in proper ordering.
 	EventChan() <-chan *MemberEvent
 
-	// Members provides a point-in-time view of cluster members
-	Members() []Member
-
-	AliveMembers() []Member
-
 	// Leader returns a point-in-time leader member information
-	Leader() Member
+	Leader() *Member
 
 	IsLeader() bool
 

@@ -1,32 +1,28 @@
 package es
 
 import (
-	proto "github.com/gogo/protobuf/proto"
-	ptypes "github.com/gogo/protobuf/types"
-	stan "github.com/nats-io/stan.go"
-	"github.com/pkg/errors"
+	"time"
 )
 
-func UnpackEvent(m *stan.Msg) (evtAny *ptypes.DynamicAny, err error) {
-	evt := &EventMessage{}
-	if err := evt.Unmarshal(m.Data); err != nil {
-		return nil, errors.Wrap(err, "unable to unmarshal message")
-	}
-	evtAny = &ptypes.DynamicAny{}
-	if err := ptypes.UnmarshalAny(evt.Data, evtAny); err != nil {
-		return nil, errors.Wrap(err, "unable to unmarshal message event data")
-	}
-	return evtAny, nil
+//EventVersion is the version of an event being inserted or queried from the event store
+type EventVersion uint64
+
+//EventData represents the event to be saved
+type EventData struct {
+	Data     []byte
+	Metadata []byte
 }
 
-func PackEvent(evtData proto.Message) ([]byte, error) {
-	evtAny, err := ptypes.MarshalAny(evtData)
-	if err != nil {
-		return nil, err
-	}
-	evt := EventMessage{
-		Data:      evtAny,
-		Timestamp: ptypes.TimestampNow(),
-	}
-	return evt.Marshal()
+//RecordedEventData represents a saved event from the store
+type RecordedEventData struct {
+	EventData
+	AggregateStream string
+	AggregateID     string
+	Version         EventVersion
+	Created         time.Time
+}
+
+type EventStore interface {
+	AppendToStream(aggregateStream string, aggregateID string, events []EventData) error
+	ReadEventStream(aggregateStream string, aggregateID string, startEventNumber EventVersion, follow bool, h func(*RecordedEventData, error))
 }

@@ -26,7 +26,7 @@ type NatsClusterConfig struct {
 
 type NatsCluster struct {
 	NatsClusterConfig
-	// stanConn         stan.Conn
+
 	members          map[uuid.UUID]*memberState
 	shutdownCh       chan struct{}
 	eventCh          chan *cluster.MemberEvent
@@ -97,28 +97,8 @@ func (c *NatsCluster) EventChan() <-chan *cluster.MemberEvent {
 	return c.eventCh
 }
 
-func (c *NatsCluster) Members() []cluster.Member {
-	m := []cluster.Member{}
-	for _, ms := range c.members {
-		if ms.Status != cluster.StatusLeft {
-			m = append(m, ms.Member)
-		}
-	}
-	return m
-}
-
-func (c *NatsCluster) AliveMembers() []cluster.Member {
-	m := []cluster.Member{}
-	for _, ms := range c.members {
-		if ms.Status == cluster.StatusAlive {
-			m = append(m, ms.Member)
-		}
-	}
-	return m
-}
-
-func (c *NatsCluster) Leader() cluster.Member {
-	return c.members[c.leaderID].Member
+func (c *NatsCluster) Leader() *cluster.Member {
+	return &c.members[c.leaderID].Member
 }
 
 func (c *NatsCluster) IsLeader() bool {

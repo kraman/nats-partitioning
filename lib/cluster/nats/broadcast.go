@@ -13,9 +13,14 @@ import (
 )
 
 func (c *NatsCluster) postMemberEvent(t cluster.EventType, m cluster.Member) {
+	members := []cluster.Member{}
+	for _, m := range c.members {
+		members = append(members, m.Member)
+	}
+
 	c.Logger.Debugf("post member event %v %v", t, m)
 	select {
-	case c.eventCh <- &cluster.MemberEvent{Type: t, Member: m, Members: c.Members()}:
+	case c.eventCh <- &cluster.MemberEvent{Type: t, Member: m, Members: members}:
 	default:
 	}
 }
