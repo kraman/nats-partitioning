@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kraman/nats-test/lib/cluster"
+	"github.com/kraman/nats-test/lib/discovery"
 
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/clientv3/concurrency"
@@ -27,31 +27,33 @@ type EtcdCluster struct {
 	EtcdClusterConfig
 	sync.Mutex
 
-	eventCh              chan *cluster.MemberEvent
+	eventCh              chan *discovery.MemberEvent
+	eventHandlers        *sync.Map
 	clusterCtx           context.Context
 	clusterCtxCancelFunc context.CancelFunc
-	self                 *cluster.Member
+	self                 *discovery.Member
 	leaderElection       *concurrency.Election
 
-	members map[string]*cluster.Member
+	members map[string]*discovery.Member
 }
 
-func Create(config EtcdClusterConfig) (cluster.Cluster, error) {
+func Create(config EtcdClusterConfig) (discovery.Cluster, error) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
 	c := &EtcdCluster{
 		EtcdClusterConfig:    config,
-		eventCh:              make(chan *cluster.MemberEvent),
+		eventCh:              make(chan *discovery.MemberEvent),
+		eventHandlers:        &sync.Map{},
 		clusterCtx:           ctx,
 		clusterCtxCancelFunc: cancelFunc,
-		self: &cluster.Member{
+		self: &discovery.Member{
 			ID:       uuid.NewV4(),
 			Addr:     config.NodeName,
 			Tags:     map[string]string{},
-			Status:   cluster.StatusAlive,
+			Status:   discovery.StatusAlive,
 			IsLeader: false,
 		},
-		members: map[string]*cluster.Member{},
+		members: map[string]*discovery.Member{},
 	}
 
 	selfJSON, err := json.Marshal(c.self)
@@ -75,15 +77,15 @@ func Create(config EtcdClusterConfig) (cluster.Cluster, error) {
 		return nil, err
 	}
 
-	c.leaderElection = concurrency.NewElection(session, fmt.Sprintf("cluster/%s-leader", c.ClusterName))
-	updatesCh := c.EtcdConn.Watch(clientv3.WithRequireLeader(c.clusterCtx), fmt.Sprintf("cluster/%s/", c.ClusterName), clientv3.WithPrefix())
+	c.leaderElection = concurrency.NewElection(session, fmt.Sprintf("cluster.%s-leader", c.ClusterName))
+	updatesCh := c.EtcdConn.Watch(clientv3.WithRequireLeader(c.clusterCtx), fmt.Sprintf("cluster.%s.", c.ClusterName), clientv3.WithPrefix())
 	electionCh := c.leaderElection.Observe(c.clusterCtx)
 
 	timeoutCtx, cancelFunc := context.WithTimeout(ctx, time.Second*5)
 	defer cancelFunc()
 	_, err = c.EtcdConn.Put(
 		timeoutCtx,
-		fmt.Sprintf("cluster/%s/%s", c.ClusterName, c.self.ID.String()),
+		fmt.Sprintf("cluster.%s.%s", c.ClusterName, c.self.ID.String()),
 		string(selfJSON), clientv3.WithLease(grantResp.ID))
 	if err != nil {
 		logrus.Fatal(err)
@@ -97,6 +99,21 @@ func Create(config EtcdClusterConfig) (cluster.Cluster, error) {
 			logrus.Fatal(err)
 		}
 	}()
+
+	go func() {
+		for {
+			select {
+			case e := <-c.eventCh:
+				c.eventHandlers.Range(func(_ interface{}, h interface{}) bool {
+					h.(discovery.EventHandler)(e)
+					return true
+				})
+			case <-c.clusterCtx.Done():
+				return
+			}
+		}
+	}()
+
 	return c, nil
 }
 
@@ -108,69 +125,52 @@ func (c *EtcdCluster) watchMembers(updatesCh clientv3.WatchChan, electionCh <-ch
 			for _, ev := range watchEvent.Events {
 				c.Lock()
 				if ev.Type == clientv3.EventTypePut {
-					member := &cluster.Member{}
+					member := &discovery.Member{}
 					if err := json.Unmarshal(ev.Kv.Value, member); err != nil {
 						logrus.Fatal(err)
 					}
 					c.members[string(ev.Kv.Key)] = member
 
-					members := []cluster.Member{}
+					members := []discovery.Member{}
 					for k := range c.members {
 						members = append(members, *c.members[k])
 					}
 
 					if ev.IsCreate() {
 						logrus.Infof("member-join %v", member)
-						c.eventCh <- &cluster.MemberEvent{
-							Type:    cluster.EventMemberJoin,
+						c.eventCh <- &discovery.MemberEvent{
+							Type:    discovery.EventMemberJoin,
 							Member:  *member,
 							Members: members,
 						}
 					} else {
 						logrus.Infof("member-update %v", member)
-						c.eventCh <- &cluster.MemberEvent{
-							Type:    cluster.EventMemberUpdate,
+						c.eventCh <- &discovery.MemberEvent{
+							Type:    discovery.EventMemberUpdate,
 							Member:  *member,
 							Members: members,
 						}
 					}
 				} else if ev.Type == clientv3.EventTypeDelete {
 					deletedMember := c.members[string(ev.Kv.Key)]
-					deletedMember.Status = cluster.StatusLeft
+					deletedMember.Status = discovery.StatusLeft
 					logrus.Infof("member-reap %v", deletedMember)
 					delete(c.members, string(ev.Kv.Key))
 
-					members := []cluster.Member{}
+					members := []discovery.Member{}
 					for k := range c.members {
 						members = append(members, *c.members[k])
 					}
-					c.eventCh <- &cluster.MemberEvent{
-						Type:    cluster.EventMemberReap,
+					c.eventCh <- &discovery.MemberEvent{
+						Type:    discovery.EventMemberReap,
 						Member:  *deletedMember,
 						Members: members,
 					}
 				}
 				c.Unlock()
 			}
-		case leaderUpdate := <-electionCh:
-			c.Lock()
-			leaderID := leaderUpdate.Kvs[0].Value
-			var leader *cluster.Member
-			members := []cluster.Member{}
-			for k := range c.members {
-				c.members[k].IsLeader = c.members[k].ID.String() == string(leaderID)
-				if c.members[k].IsLeader {
-					leader = c.members[k]
-				}
-				members = append(members, *c.members[k])
-			}
-			logrus.Infof("leader-elected %v", leader)
-			c.eventCh <- &cluster.MemberEvent{
-				Type:    cluster.EventMemberIsLeader,
-				Member:  *leader,
-				Members: members,
-			}
-			c.Unlock()
+		case <-electionCh:
+			c.updateView()
 		}
 	}
 }
@@ -184,17 +184,13 @@ func (c *EtcdCluster) Shutdown() error {
 	return c.Leave()
 }
 
-func (c *EtcdCluster) EventChan() <-chan *cluster.MemberEvent {
-	return c.eventCh
-}
-
 func (c *EtcdCluster) updateView() error {
 	c.Lock()
 	defer c.Unlock()
 
 	timeoutCtx, cancelFunc := context.WithTimeout(c.clusterCtx, time.Second*5)
 	defer cancelFunc()
-	resp, err := c.EtcdConn.KV.Get(timeoutCtx, fmt.Sprintf("cluster/%s/", c.ClusterName), clientv3.WithPrefix())
+	resp, err := c.EtcdConn.KV.Get(timeoutCtx, fmt.Sprintf("cluster.%s.", c.ClusterName), clientv3.WithPrefix())
 	if err != nil {
 		return err
 	}
@@ -206,9 +202,9 @@ func (c *EtcdCluster) updateView() error {
 		return err
 	}
 
-	members := map[string]*cluster.Member{}
+	members := map[string]*discovery.Member{}
 	for _, v := range resp.Kvs {
-		member := &cluster.Member{}
+		member := &discovery.Member{}
 		if err := json.Unmarshal(v.Value, member); err != nil {
 			return err
 		}
@@ -222,7 +218,7 @@ func (c *EtcdCluster) updateView() error {
 	return nil
 }
 
-func (c *EtcdCluster) Leader() *cluster.Member {
+func (c *EtcdCluster) Leader() *discovery.Member {
 	c.Lock()
 	defer c.Unlock()
 	for _, m := range c.members {
@@ -231,6 +227,28 @@ func (c *EtcdCluster) Leader() *cluster.Member {
 		}
 	}
 	return nil
+}
+
+// Get returns point-in-time member information
+func (c *EtcdCluster) Members() ([]discovery.Member, error) {
+	timeoutCtx, cancelFunc := context.WithTimeout(c.clusterCtx, time.Second*5)
+	defer cancelFunc()
+
+	memberResp, err := c.EtcdConn.Get(timeoutCtx, fmt.Sprintf("cluster.%s.", c.ClusterName), clientv3.WithPrefix())
+	if err != nil {
+		return nil, err
+	}
+
+	members := make([]discovery.Member, memberResp.Count)
+	for i, kv := range memberResp.Kvs {
+		member := discovery.Member{}
+		if err := json.Unmarshal(kv.Value, &member); err != nil {
+			return nil, err
+		}
+		members[i] = member
+	}
+
+	return members, nil
 }
 
 func (c *EtcdCluster) IsLeader() bool {
@@ -253,4 +271,15 @@ func (c *EtcdCluster) ID() uuid.UUID {
 
 func (c *EtcdCluster) Name() string {
 	return c.ClusterName
+}
+
+func (c *EtcdCluster) RegisterEventHandler(name string, h discovery.EventHandler) {
+	c.eventHandlers.Store(name, h)
+	if members, err := c.Members(); err == nil && len(members) > 0 {
+		h(&discovery.MemberEvent{Type: discovery.EventMemberUpdate, Members: members})
+	}
+}
+
+func (c *EtcdCluster) UnregisterEventHandler(name string) {
+	c.eventHandlers.Delete(name)
 }

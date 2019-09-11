@@ -9,59 +9,49 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kraman/nats-test/lib/cluster"
-	"github.com/kraman/nats-test/lib/manager"
+	"github.com/kraman/nats-test/lib/consumergroup"
+	"github.com/kraman/nats-test/lib/discovery"
 	"github.com/nats-io/stan.go"
 
 	"github.com/LK4D4/trylock"
 	"github.com/coreos/etcd/clientv3"
 	"github.com/lafikl/consistent"
-	"github.com/sirupsen/logrus"
 )
 
-type EtcdManagerConfig struct {
-	EtcdConn *clientv3.Client
-	Logger   *logrus.Logger
-	Cluster  cluster.Cluster
-
-	NumPartitions int
-	NodeTTLSec    time.Duration
-
-	StanConn stan.Conn
-	Handler  manager.MsgHandler
-}
-
 type consumerGroupManager struct {
-	EtcdManagerConfig
+	consumergroup.Config
 	sync.Mutex
 
+	etcdConn             *clientv3.Client
 	managerCtx           context.Context
 	managerCtxCancelFunc context.CancelFunc
 
 	leaseID            clientv3.LeaseID
 	assignedPartitions map[int]string
-	partitionLocks     map[int]*trylock.Mutex
-	subscriptions      map[int]stan.Subscription
+
+	partitionLocks map[int]*trylock.Mutex
+	subscriptions  map[int]stan.Subscription
 }
 
-func Create(config EtcdManagerConfig) (manager.ConsumerGroupManager, error) {
+func NewConsumerGroup(etcdConn *clientv3.Client, config consumergroup.Config) (consumergroup.ConsumerGroup, error) {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 
 	manager := &consumerGroupManager{
-		EtcdManagerConfig:    config,
+		Config:               config,
+		etcdConn:             etcdConn,
 		managerCtx:           ctx,
 		managerCtxCancelFunc: cancelFunc,
 		partitionLocks:       map[int]*trylock.Mutex{},
 		subscriptions:        map[int]stan.Subscription{},
 	}
 
-	grantResp, err := manager.EtcdConn.Grant(manager.managerCtx, int64(manager.NodeTTLSec/time.Second))
+	grantResp, err := manager.etcdConn.Grant(manager.managerCtx, int64(manager.NodeTTLSec/time.Second))
 	if err != nil {
 		return nil, err
 	}
 
 	manager.leaseID = grantResp.ID
-	if _, err := manager.EtcdConn.KeepAlive(manager.managerCtx, grantResp.ID); err != nil {
+	if _, err := manager.etcdConn.KeepAlive(manager.managerCtx, grantResp.ID); err != nil {
 		cancelFunc()
 		return nil, err
 	}
@@ -71,8 +61,9 @@ func Create(config EtcdManagerConfig) (manager.ConsumerGroupManager, error) {
 	return manager, nil
 }
 
-func (m *consumerGroupManager) Shutdown() {
+func (m *consumerGroupManager) Shutdown() error {
 	m.managerCtxCancelFunc()
+	return nil
 }
 
 func (m *consumerGroupManager) processReleases(msg *clientv3.Event, acquireCh chan int, releaseCh chan int) {
@@ -118,7 +109,7 @@ out:
 	}
 }
 
-func (m *consumerGroupManager) assignPartitions(msg *cluster.MemberEvent) {
+func (m *consumerGroupManager) assignPartitions(msg *discovery.MemberEvent) {
 	if !m.Cluster.IsLeader() {
 		return
 	}
@@ -146,9 +137,9 @@ func (m *consumerGroupManager) assignPartitions(msg *cluster.MemberEvent) {
 
 	timeoutCtx, cancelFunc := context.WithTimeout(m.managerCtx, time.Second*5)
 	defer cancelFunc()
-	getResp, err := m.EtcdConn.Get(
+	getResp, err := m.etcdConn.Get(
 		timeoutCtx,
-		fmt.Sprintf("partition.%s.assigned", m.Cluster.Name()),
+		fmt.Sprintf("partition.%s.assigned", m.Subject),
 	)
 	if err != nil {
 		m.Logger.Fatal(err)
@@ -162,9 +153,9 @@ func (m *consumerGroupManager) assignPartitions(msg *cluster.MemberEvent) {
 
 	timeoutCtx, cancelFunc = context.WithTimeout(m.managerCtx, time.Second*5)
 	defer cancelFunc()
-	_, err = m.EtcdConn.Put(
+	_, err = m.etcdConn.Put(
 		timeoutCtx,
-		fmt.Sprintf("partition.%s.assigned", m.Cluster.Name()), string(b),
+		fmt.Sprintf("partition.%s.assigned", m.Subject), string(b),
 	)
 	if err != nil {
 		m.Logger.Fatal(err)
@@ -173,16 +164,24 @@ func (m *consumerGroupManager) assignPartitions(msg *cluster.MemberEvent) {
 
 func (m *consumerGroupManager) updateOwners() {
 	doneCh := m.managerCtx.Done()
-	memberCh := m.Cluster.EventChan()
-	updatesCh := m.EtcdConn.Watch(m.managerCtx, fmt.Sprintf("partition.%s.", m.Cluster.Name()), clientv3.WithPrefix())
+	memberCh := make(chan *discovery.MemberEvent, 10)
+	updatesCh := m.etcdConn.Watch(m.managerCtx, fmt.Sprintf("partition.%s.", m.Subject), clientv3.WithPrefix())
 	releaseCh := make(chan int, m.NumPartitions)
 	acquireCh := make(chan int, m.NumPartitions)
 
+	m.Cluster.RegisterEventHandler(m.Subject, func(e *discovery.MemberEvent) {
+		if m.managerCtx.Err() != nil {
+			m.Cluster.UnregisterEventHandler(m.Subject)
+			return
+		}
+		memberCh <- e
+	})
+
 	timeoutCtx, cancelFunc := context.WithTimeout(m.managerCtx, time.Second*5)
 	defer cancelFunc()
-	getResp, err := m.EtcdConn.Get(
+	getResp, err := m.etcdConn.Get(
 		timeoutCtx,
-		fmt.Sprintf("partition.%s.assigned", m.Cluster.Name()),
+		fmt.Sprintf("partition.%s.assigned", m.Subject),
 	)
 	if err != nil {
 		m.Logger.Fatal(err)
@@ -197,9 +196,9 @@ func (m *consumerGroupManager) updateOwners() {
 			m.Logger.Debugf("attempt acquire partititon %d", partitionID)
 			timeoutCtx, cancelFunc := context.WithTimeout(m.managerCtx, time.Second*5)
 			defer cancelFunc()
-			getResp, err := m.EtcdConn.Get(
+			getResp, err := m.etcdConn.Get(
 				timeoutCtx,
-				fmt.Sprintf("partition.%s.%d", m.Cluster.Name(), partitionID),
+				fmt.Sprintf("partition.%s.%d", m.Subject, partitionID),
 			)
 			if err != nil {
 				m.Logger.Fatal(err)
@@ -209,8 +208,8 @@ func (m *consumerGroupManager) updateOwners() {
 				timeoutCtx, cancelFunc := context.WithTimeout(m.managerCtx, time.Second*5)
 				defer cancelFunc()
 
-				partName := fmt.Sprintf("partition.%s.%d", m.Cluster.Name(), partitionID)
-				_, err = m.EtcdConn.Put(
+				partName := fmt.Sprintf("partition.%s.%d", m.Subject, partitionID)
+				_, err = m.etcdConn.Put(
 					timeoutCtx,
 					partName, m.Cluster.ID().String(),
 					clientv3.WithLease(m.leaseID),
@@ -249,9 +248,9 @@ func (m *consumerGroupManager) updateOwners() {
 
 					timeoutCtx, cancelFunc := context.WithTimeout(m.managerCtx, time.Second*5)
 					defer cancelFunc()
-					_, err := m.EtcdConn.Delete(
+					_, err := m.etcdConn.Delete(
 						timeoutCtx,
-						fmt.Sprintf("partition.%s.%d", m.Cluster.Name(), partitionID),
+						fmt.Sprintf("partition.%s.%d", m.Subject, partitionID),
 					)
 					if err != nil {
 						m.Logger.Fatal(err)
@@ -292,11 +291,11 @@ func (m *consumerGroupManager) handleMessage(msg *stan.Msg) {
 	}
 	defer lock.Unlock()
 
-	m.Handler(partitionIDStr, msg.Sequence, msg.Data)
+	m.Handler(partitionIDStr, msg)
 	msg.Ack()
 }
 
-func (m *consumerGroupManager) Send(partitionKey string, msg []byte) (err error) {
+func (m *consumerGroupManager) Publish(partitionKey string, msg []byte) (err error) {
 	hashRing := consistent.New()
 	for i := 0; i < m.NumPartitions; i++ {
 		hashRing.Add(strconv.Itoa(i))
@@ -307,7 +306,7 @@ func (m *consumerGroupManager) Send(partitionKey string, msg []byte) (err error)
 		return err
 	}
 
-	if err = m.StanConn.Publish(fmt.Sprintf("partition.%s.%s", m.Cluster.Name(), partitionIDStr), msg); err != nil {
+	if err = m.StanConn.Publish(fmt.Sprintf("partition.%s.%s", m.Subject, partitionIDStr), msg); err != nil {
 		return err
 	}
 

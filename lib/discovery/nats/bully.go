@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/kraman/nats-test/lib/cluster"
+	"github.com/kraman/nats-test/lib/discovery"
 )
 
 func (c *NatsCluster) startElection() {
@@ -31,7 +31,7 @@ func (c *NatsCluster) stopElection() {
 func (c *NatsCluster) processElectionAnnouncement(m *memberState) {
 	c.Lock()
 	defer c.Unlock()
-	if m.ID == c.clientID || m.Status != cluster.StatusAlive {
+	if m.ID == c.clientID || m.Status != discovery.StatusAlive {
 		return
 	}
 	if m.IsLeader {

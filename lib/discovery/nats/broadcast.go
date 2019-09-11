@@ -6,21 +6,21 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/kraman/nats-test/lib/cluster"
+	"github.com/kraman/nats-test/lib/discovery"
 
 	nats "github.com/nats-io/nats.go"
 	uuid "github.com/satori/go.uuid"
 )
 
-func (c *NatsCluster) postMemberEvent(t cluster.EventType, m cluster.Member) {
-	members := []cluster.Member{}
+func (c *NatsCluster) postMemberEvent(t discovery.EventType, m discovery.Member) {
+	members := []discovery.Member{}
 	for _, m := range c.members {
 		members = append(members, m.Member)
 	}
 
 	c.Logger.Debugf("post member event %v %v", t, m)
 	select {
-	case c.eventCh <- &cluster.MemberEvent{Type: t, Member: m, Members: members}:
+	case c.eventCh <- &discovery.MemberEvent{Type: t, Member: m, Members: members}:
 	default:
 	}
 }
@@ -60,7 +60,7 @@ func (c *NatsCluster) processBroadcast(msgCh chan *nats.Msg, pingSub *nats.Subsc
 	t := time.Tick(c.NodeTTLSec)
 	gossipSettleTimer := time.NewTimer(c.NodeTTLSec)
 	bcastTick := time.Tick(c.NodeTTLSec / 2)
-	c.postMemberEvent(cluster.EventMemberJoin, c.members[c.clientID].Member)
+	c.postMemberEvent(discovery.EventMemberJoin, c.members[c.clientID].Member)
 
 	for {
 		select {
@@ -86,7 +86,7 @@ func (c *NatsCluster) processBroadcast(msgCh chan *nats.Msg, pingSub *nats.Subsc
 		case <-gossipSettleTimer.C:
 			// trigger election and update election leader result
 			for _, m := range c.members {
-				if m.Status == cluster.StatusAlive && m.IsLeader {
+				if m.Status == discovery.StatusAlive && m.IsLeader {
 					c.leaderID = m.ID
 				}
 			}
@@ -104,19 +104,19 @@ func (c *NatsCluster) processBroadcast(msgCh chan *nats.Msg, pingSub *nats.Subsc
 						c.startElection()
 					}
 					switch m.Status {
-					case cluster.StatusLeaving:
-						m.Status = cluster.StatusLeft
-						c.postMemberEvent(cluster.EventMemberLeave, m.Member)
-					case cluster.StatusLeft:
+					case discovery.StatusLeaving:
+						m.Status = discovery.StatusLeft
+						c.postMemberEvent(discovery.EventMemberLeave, m.Member)
+					case discovery.StatusLeft:
 						fallthrough
-					case cluster.StatusFailed:
+					case discovery.StatusFailed:
 						if m.WallTime.Before(time.Now().Add(-c.ReaperTimeout)) {
-							c.postMemberEvent(cluster.EventMemberReap, m.Member)
+							c.postMemberEvent(discovery.EventMemberReap, m.Member)
 							delete(c.members, m.ID)
 						}
 					default:
-						m.Status = cluster.StatusFailed
-						c.postMemberEvent(cluster.EventMemberFailed, m.Member)
+						m.Status = discovery.StatusFailed
+						c.postMemberEvent(discovery.EventMemberFailed, m.Member)
 					}
 				}
 			}
@@ -140,14 +140,14 @@ func (c *NatsCluster) processBroadcast(msgCh chan *nats.Msg, pingSub *nats.Subsc
 				if cm, ok := c.members[message.Member.ID]; !ok {
 					message.Member.WallTime = time.Now()
 					c.members[message.Member.ID] = message.Member
-					c.postMemberEvent(cluster.EventMemberJoin, message.Member.Member)
+					c.postMemberEvent(discovery.EventMemberJoin, message.Member.Member)
 				} else {
 					cm.WallTime = time.Now()
 					if !reflect.DeepEqual(cm.Tags, message.Member.Tags) || cm.Status != message.Member.Status || cm.IsLeader != message.Member.IsLeader {
 						cm.Tags = message.Member.Tags
 						cm.Status = message.Member.Status
 						cm.IsLeader = message.Member.IsLeader
-						c.postMemberEvent(cluster.EventMemberUpdate, cm.Member)
+						c.postMemberEvent(discovery.EventMemberUpdate, cm.Member)
 					}
 				}
 
@@ -168,7 +168,7 @@ func (c *NatsCluster) processBroadcast(msgCh chan *nats.Msg, pingSub *nats.Subsc
 			self := c.members[c.clientID]
 			self.IsLeader = true
 			c.leaderID = c.clientID
-			c.postMemberEvent(cluster.EventMemberIsLeader, c.members[c.clientID].Member)
+			c.postMemberEvent(discovery.EventMemberIsLeader, c.members[c.clientID].Member)
 		case <-c.shutdownCh:
 			// exit loop
 			return

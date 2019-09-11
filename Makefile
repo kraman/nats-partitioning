@@ -12,7 +12,7 @@ define deref
 $(shell go list -f "{{ .Dir }}" -m $(1))
 endef
 
-build: lib/partitions/partitions.pb.go lib/es/event.pb.go
+build: service/service.pb.go #lib/manager/nats/partitions.pb.go lib/manager/nats/es/event.pb.go
 
 clean: clean-proto
 

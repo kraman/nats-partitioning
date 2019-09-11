@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/kraman/nats-test/lib/cluster"
+	"github.com/kraman/nats-test/lib/discovery"
 
 	"github.com/hashicorp/serf/serf"
 	nats "github.com/nats-io/nats.go"
@@ -29,7 +29,7 @@ type NatsCluster struct {
 
 	members          map[uuid.UUID]*memberState
 	shutdownCh       chan struct{}
-	eventCh          chan *cluster.MemberEvent
+	eventCh          chan *discovery.MemberEvent
 	lClock           *serf.LamportClock
 	bcastChannelName string
 	clientID         uuid.UUID
@@ -43,7 +43,7 @@ type NatsCluster struct {
 
 // Create creates a new Cluster instance, starting all the background tasks
 // to maintain membership information.
-func Create(config NatsClusterConfig) (cluster.Cluster, error) {
+func Create(config NatsClusterConfig) (discovery.Cluster, error) {
 	clientID := uuid.NewV4()
 
 	c := &NatsCluster{
@@ -51,17 +51,17 @@ func Create(config NatsClusterConfig) (cluster.Cluster, error) {
 		clientID:          clientID,
 		members: map[uuid.UUID]*memberState{
 			clientID: &memberState{
-				Member: cluster.Member{
+				Member: discovery.Member{
 					Addr:   config.NodeName,
 					Tags:   map[string]string{},
-					Status: cluster.StatusAlive,
+					Status: discovery.StatusAlive,
 					ID:     clientID,
 				},
 				WallTime: time.Now(),
 			},
 		},
 		shutdownCh: make(chan struct{}),
-		eventCh:    make(chan *cluster.MemberEvent),
+		eventCh:    make(chan *discovery.MemberEvent),
 		leaderCh:   make(chan int),
 		lClock:     &serf.LamportClock{},
 	}
@@ -83,7 +83,7 @@ func (c *NatsCluster) Leave() error {
 	c.Lock()
 	defer c.Unlock()
 	if m, ok := c.members[c.clientID]; ok {
-		m.Status = cluster.StatusLeaving
+		m.Status = discovery.StatusLeaving
 	}
 	return nil
 }
@@ -93,12 +93,16 @@ func (c *NatsCluster) Shutdown() error {
 	return nil
 }
 
-func (c *NatsCluster) EventChan() <-chan *cluster.MemberEvent {
+func (c *NatsCluster) EventChan() <-chan *discovery.MemberEvent {
 	return c.eventCh
 }
 
-func (c *NatsCluster) Leader() *cluster.Member {
+func (c *NatsCluster) Leader() *discovery.Member {
 	return &c.members[c.leaderID].Member
+}
+
+func (c *NatsCluster) Get(ID uuid.UUID) (*discovery.Member, error) {
+	return &c.members[ID].Member, nil
 }
 
 func (c *NatsCluster) IsLeader() bool {

@@ -16,7 +16,7 @@ ifeq ($(shell uname -s),Darwin)
 else
 	@rm -f build/tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
 	@rm -rf build/tmp/etcd-download && mkdir -p build/tmp/etcd-download
-	@curl -sL ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-$(OS)-amd64.tar.gz -o build/tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
+	@curl -sL ${DOWNLOAD_URL}/${ETCD_VER}/etcd-${ETCD_VER}-linux-amd64.tar.gz -o build/tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
 	@tar xzf build/tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz -C build/tmp/etcd-download --strip-components=1
 	@rm -f build/tmp/etcd-${ETCD_VER}-linux-amd64.tar.gz
 	@cp build/tmp/etcd-download/etcd build/tmp/etcd-download/etcdctl $(@D)/
@@ -27,7 +27,7 @@ endif
 start-etcd: build/run/.etcd-server
 build/run/.etcd-server: build/bin/etcd
 	@mkdir -p build/run/default.etcd
-	@build/bin/etcd --data-dir build/run/default.etcd & echo $$! > $@;
+	@build/bin/etcd --data-dir build/run/default.etcd --listen-client-urls 'http://localhost:3379' --advertise-client-urls 'http://localhost:3379' --listen-peer-urls 'http://localhost:3380' --initial-advertise-peer-urls 'http://localhost:3380' --initial-cluster 'default=http://localhost:3380' & echo $$! > $@;
 
 stop-etcd:
 ifneq (,$(wildcard ./build/run/.etcd-server))

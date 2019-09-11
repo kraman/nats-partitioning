@@ -1,4 +1,4 @@
-package cluster
+package discovery
 
 import (
 	"fmt"
@@ -17,12 +17,14 @@ type Cluster interface {
 	// It is safe to call this method multiple times.
 	Shutdown() error
 
-	// EventChan returns a channel that receives all the member events. The events
-	// are sent on this channel in proper ordering.
-	EventChan() <-chan *MemberEvent
+	RegisterEventHandler(name string, h EventHandler)
+	UnregisterEventHandler(name string)
 
 	// Leader returns a point-in-time leader member information
 	Leader() *Member
+
+	// Get returns point-in-time member information
+	Members() ([]Member, error)
 
 	IsLeader() bool
 
@@ -31,8 +33,10 @@ type Cluster interface {
 	Name() string
 }
 
+type EventHandler func(*MemberEvent)
+
 type Member struct {
-	Addr   interface{}
+	Addr   string
 	Tags   map[string]string
 	Status MemberStatus
 	ID     uuid.UUID

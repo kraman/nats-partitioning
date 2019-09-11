@@ -1,7 +1,7 @@
 package manager
 
-import "github.com/kraman/nats-test/lib/cluster"
+type MsgHandler func(partitionID string, seqNo uint64, msg []byte)
 
-type PartitionManager interface {
-	Invoke(partitionKey string, f func(partitionOwner *cluster.Member))
+type ConsumerGroupManager interface {
+	Send(partitionKey string, msg []byte) (err error)
 }

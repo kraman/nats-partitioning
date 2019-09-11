@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/kraman/nats-test/lib/cluster"
+	"github.com/kraman/nats-test/lib/discovery"
 
 	"github.com/hashicorp/serf/serf"
 )
 
 type memberState struct {
-	cluster.Member
+	discovery.Member
 	WallTime time.Time
 	LTime    serf.LamportTime
 }
